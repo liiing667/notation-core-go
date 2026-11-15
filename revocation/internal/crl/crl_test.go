@@ -107,6 +107,7 @@ func TestCertCheckStatus(t *testing.T) {
 		memoryCache := &memoryCache{}
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 			RevokedCertificateEntries: []x509.RevocationListEntry{
@@ -140,6 +141,7 @@ func TestCertCheckStatus(t *testing.T) {
 		memoryCache := &memoryCache{}
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 			RevokedCertificateEntries: []x509.RevocationListEntry{
@@ -180,6 +182,7 @@ func TestCertCheckStatus(t *testing.T) {
 		memoryCache := &memoryCache{}
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 		}, issuerCert, issuerKey)
@@ -207,6 +210,7 @@ func TestCertCheckStatus(t *testing.T) {
 
 	// create a stale CRL
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		ThisUpdate: time.Now().Add(-2 * time.Hour),
 		NextUpdate: time.Now().Add(-time.Hour),
 		Number:     big.NewInt(20240720),
 	}, issuerCert, issuerKey)
@@ -274,6 +278,7 @@ func TestCertCheckStatus(t *testing.T) {
 		}
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 		}, issuerCert, issuerKey)
@@ -298,6 +303,10 @@ func TestCertCheckStatus(t *testing.T) {
 	})
 
 	t.Run("freshest CRL from certificate extension is not supported", func(t *testing.T) {
+		originalExtensions := chain[0].Cert.Extensions
+		defer func() {
+			chain[0].Cert.Extensions = originalExtensions
+		}()
 		chain[0].Cert.Extensions = []pkix.Extension{
 			{
 				Id: oidFreshestCRL,
@@ -305,6 +314,7 @@ func TestCertCheckStatus(t *testing.T) {
 		}
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 		}, issuerCert, issuerKey)
@@ -328,6 +338,83 @@ func TestCertCheckStatus(t *testing.T) {
 		expectedErrorMsg := "freshest CRL from certificate extension is not supported"
 		if r.ServerResults[0].Error == nil || r.ServerResults[0].Error.Error() != expectedErrorMsg {
 			t.Fatalf("expected error %q, got %v", expectedErrorMsg, r.ServerResults[0].Error)
+		}
+	})
+
+	t.Run("bundle without base CRL is rejected", func(t *testing.T) {
+		fetcher := &bundleFetcherMock{
+			bundle: &crlutils.Bundle{},
+		}
+		r := CertCheckStatus(context.Background(), chain[0].Cert, issuerCert, CertCheckStatusOptions{
+			Fetcher: fetcher,
+		})
+		if r.Result != result.ResultUnknown {
+			t.Fatalf("expected Unknown, got %s", r.Result)
+		}
+		if r.ServerResults[0].Error == nil {
+			t.Fatal("expected error")
+		}
+		expectedErrorMsg := "failed to validate CRL from http://localhost.test: base CRL cannot be nil"
+		if r.ServerResults[0].Error.Error() != expectedErrorMsg {
+			t.Fatalf("expected error %q, got %v", expectedErrorMsg, r.ServerResults[0].Error)
+		}
+	})
+
+	t.Run("expired delta CRL is rejected", func(t *testing.T) {
+		baseCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
+			NextUpdate: time.Now().Add(time.Hour),
+			Number:     big.NewInt(20240720),
+		}, issuerCert, issuerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseCRL, err := x509.ParseRevocationList(baseCRLBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deltaCRLIndicatorBytes, err := asn1.Marshal(big.NewInt(20240720))
+		if err != nil {
+			t.Fatal(err)
+		}
+		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now().Add(-2 * time.Hour),
+			NextUpdate: time.Now().Add(-time.Hour),
+			Number:     big.NewInt(20240721),
+			ExtraExtensions: []pkix.Extension{
+				{
+					Id:       oidDeltaCRLIndicator,
+					Critical: true,
+					Value:    deltaCRLIndicatorBytes,
+				},
+			},
+		}, issuerCert, issuerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deltaCRL, err := x509.ParseRevocationList(deltaCRLBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fetcher := &bundleFetcherMock{
+			bundle: &crlutils.Bundle{
+				BaseCRL:  baseCRL,
+				DeltaCRL: deltaCRL,
+			},
+		}
+		r := CertCheckStatus(context.Background(), chain[0].Cert, issuerCert, CertCheckStatusOptions{
+			Fetcher: fetcher,
+		})
+		if r.Result != result.ResultUnknown {
+			t.Fatalf("expected Unknown, got %s", r.Result)
+		}
+		if r.ServerResults[0].Error == nil {
+			t.Fatal("expected error")
+		}
+		expectedErrorMsg := "failed to validate delta CRL: expired CRL"
+		if !strings.HasPrefix(r.ServerResults[0].Error.Error(), "failed to validate CRL from") ||
+			!strings.Contains(r.ServerResults[0].Error.Error(), expectedErrorMsg) {
+			t.Fatalf("expected error containing %q, got %v", expectedErrorMsg, r.ServerResults[0].Error)
 		}
 	})
 }
@@ -358,6 +445,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("check signature failed", func(t *testing.T) {
 		crl := &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 		}
 
@@ -372,6 +460,7 @@ func TestValidate(t *testing.T) {
 		issuerKey := chain[0].PrivateKey
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 		}, issuerCert, issuerKey)
@@ -403,6 +492,7 @@ func TestValidate(t *testing.T) {
 		issuerKey := chain[0].PrivateKey
 
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240720),
 			ExtraExtensions: []pkix.Extension{
@@ -431,6 +521,7 @@ func TestValidate(t *testing.T) {
 	issuerKey := chain[0].PrivateKey
 
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		ThisUpdate: time.Now(),
 		NextUpdate: time.Now().Add(time.Hour),
 		Number:     big.NewInt(20240720),
 	}, issuerCert, issuerKey)
@@ -450,6 +541,7 @@ func TestValidate(t *testing.T) {
 			t.Fatal(err)
 		}
 		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240721),
 			ExtraExtensions: []pkix.Extension{
@@ -483,7 +575,9 @@ func TestValidate(t *testing.T) {
 			t.Fatal(err)
 		}
 		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
-			Number: big.NewInt(20240721),
+			ThisUpdate: time.Now(),
+			NextUpdate: time.Now().Add(time.Hour),
+			Number:     big.NewInt(20240721),
 			ExtraExtensions: []pkix.Extension{
 				{
 					Id:       oidDeltaCRLIndicator,
@@ -499,6 +593,7 @@ func TestValidate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		deltaCRL.NextUpdate = time.Time{}
 		bundle := &crlutils.Bundle{
 			BaseCRL:  crl,
 			DeltaCRL: deltaCRL,
@@ -517,6 +612,7 @@ func TestValidate(t *testing.T) {
 			t.Fatal(err)
 		}
 		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240719),
 			ExtraExtensions: []pkix.Extension{
@@ -547,6 +643,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("delta crl without delta crl indicator", func(t *testing.T) {
 		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240721),
 		}, issuerCert, issuerKey)
@@ -575,6 +672,7 @@ func TestValidate(t *testing.T) {
 			t.Fatal(err)
 		}
 		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240722),
 			ExtraExtensions: []pkix.Extension{
@@ -605,6 +703,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("delta crl with invalid delta indicator extension", func(t *testing.T) {
 		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
 			NextUpdate: time.Now().Add(time.Hour),
 			Number:     big.NewInt(20240722),
 			ExtraExtensions: []pkix.Extension{
@@ -628,6 +727,102 @@ func TestValidate(t *testing.T) {
 		}
 		err = validate(bundle, issuerCert)
 		expectedErrorMsg := "failed to parse delta CRL indicator extension"
+		if err == nil || err.Error() != expectedErrorMsg {
+			t.Fatalf("expected error %q, got %v", expectedErrorMsg, err)
+		}
+	})
+
+	t.Run("base CRL is nil", func(t *testing.T) {
+		err := validate(&crlutils.Bundle{
+			BaseCRL:  nil,
+			DeltaCRL: crl,
+		}, issuerCert)
+		expectedErrorMsg := "base CRL cannot be nil"
+		if err == nil || err.Error() != expectedErrorMsg {
+			t.Fatalf("expected error %q, got %v", expectedErrorMsg, err)
+		}
+	})
+
+	t.Run("base CRL without thisUpdate is rejected", func(t *testing.T) {
+		baseCRL := *crl
+		baseCRL.ThisUpdate = time.Time{}
+		err := validate(&crlutils.Bundle{BaseCRL: &baseCRL}, issuerCert)
+		expectedErrorMsg := "failed to validate base CRL: CRL ThisUpdate is not set"
+		if err == nil || err.Error() != expectedErrorMsg {
+			t.Fatalf("expected error %q, got %v", expectedErrorMsg, err)
+		}
+	})
+
+	t.Run("CRL with thisUpdate in the future is rejected", func(t *testing.T) {
+		futureCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now().Add(time.Hour),
+			NextUpdate: time.Now().Add(2 * time.Hour),
+			Number:     big.NewInt(20240720),
+		}, issuerCert, issuerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		futureCRL, err := x509.ParseRevocationList(futureCRLBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateCRL(futureCRL, issuerCert); err == nil {
+			t.Fatal("expected error for CRL with ThisUpdate in the future")
+		}
+	})
+
+	t.Run("CRL with NextUpdate before thisUpdate is rejected", func(t *testing.T) {
+		invalidCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
+			NextUpdate: time.Now().Add(time.Hour),
+			Number:     big.NewInt(20240720),
+		}, issuerCert, issuerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		invalidCRL, err := x509.ParseRevocationList(invalidCRLBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		invalidCRL.NextUpdate = invalidCRL.ThisUpdate.Add(-time.Hour)
+		err = validateCRL(invalidCRL, issuerCert)
+		expectedErrorMsg := "expired CRL"
+		if err == nil || !strings.HasPrefix(err.Error(), expectedErrorMsg) {
+			t.Fatalf("expected error starting with %q, got %v", expectedErrorMsg, err)
+		}
+	})
+
+	t.Run("delta CRL without thisUpdate is rejected", func(t *testing.T) {
+		deltaCRLIndicator := big.NewInt(20240720)
+		deltaCRLIndicatorBytes, err := asn1.Marshal(deltaCRLIndicator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deltaCRLBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			ThisUpdate: time.Now(),
+			NextUpdate: time.Now().Add(time.Hour),
+			Number:     big.NewInt(20240721),
+			ExtraExtensions: []pkix.Extension{
+				{
+					Id:       oidDeltaCRLIndicator,
+					Critical: true,
+					Value:    deltaCRLIndicatorBytes,
+				},
+			},
+		}, issuerCert, issuerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deltaCRL, err := x509.ParseRevocationList(deltaCRLBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deltaCRL.ThisUpdate = time.Time{}
+		err = validate(&crlutils.Bundle{
+			BaseCRL:  crl,
+			DeltaCRL: deltaCRL,
+		}, issuerCert)
+		expectedErrorMsg := "failed to validate delta CRL: CRL ThisUpdate is not set"
 		if err == nil || err.Error() != expectedErrorMsg {
 			t.Fatalf("expected error %q, got %v", expectedErrorMsg, err)
 		}
@@ -1057,6 +1252,19 @@ func TestSupported(t *testing.T) {
 	})
 }
 
+// bundleFetcherMock is a Fetcher mock that returns the given bundle.
+type bundleFetcherMock struct {
+	bundle *crlutils.Bundle
+	err    error
+}
+
+func (f *bundleFetcherMock) Fetch(_ context.Context, _ string) (*crlutils.Bundle, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.bundle, nil
+}
+
 type errorRoundTripperMock struct{}
 
 func (rt errorRoundTripperMock) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -1071,6 +1279,7 @@ func (rt expiredCRLRoundTripperMock) RoundTrip(req *http.Request) (*http.Respons
 	issuerKey := chain[0].PrivateKey
 
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		ThisUpdate: time.Now().Add(-2 * time.Hour),
 		NextUpdate: time.Now().Add(-time.Hour),
 		Number:     big.NewInt(20240720),
 	}, issuerCert, issuerKey)

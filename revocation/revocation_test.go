@@ -1322,6 +1322,7 @@ func (rt *crlRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	cert := rt.CertChain[i].Cert
 	crl := &x509.RevocationList{
+		ThisUpdate: time.Now(),
 		NextUpdate: time.Now().Add(time.Hour),
 		Number:     big.NewInt(20240720),
 	}

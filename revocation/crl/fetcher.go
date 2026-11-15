@@ -115,7 +115,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) (*Bundle, error) {
 
 // isEffective checks if the CRL is effective by checking the NextUpdate time.
 func isEffective(crl *x509.RevocationList) bool {
-	return !crl.NextUpdate.IsZero() && !time.Now().After(crl.NextUpdate)
+	return crl != nil && !crl.NextUpdate.IsZero() && !time.Now().After(crl.NextUpdate)
 }
 
 // fetch downloads the CRL from the given URL.

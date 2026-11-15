@@ -197,6 +197,30 @@ func TestFetch(t *testing.T) {
 		}
 	})
 
+	t.Run("cache hit with nil base CRL re-downloads", func(t *testing.T) {
+		c := &memoryCache{}
+		const nilBaseCRLURL = "http://localhost.test/nil-base"
+		if err := c.Set(context.Background(), nilBaseCRLURL, &Bundle{}); err != nil {
+			t.Fatalf("Cache.Set() error = %v, want nil", err)
+		}
+
+		httpClient := &http.Client{
+			Transport: &expectedRoundTripperMock{Body: baseCRL.Raw},
+		}
+		f, err := NewHTTPFetcher(httpClient)
+		if err != nil {
+			t.Fatalf("NewHTTPFetcher() error = %v, want nil", err)
+		}
+		f.Cache = c
+		fetchedBundle, err := f.Fetch(context.Background(), nilBaseCRLURL)
+		if err != nil {
+			t.Fatalf("Fetcher.Fetch() error = %v, want nil", err)
+		}
+		if fetchedBundle.BaseCRL == nil || !bytes.Equal(fetchedBundle.BaseCRL.Raw, baseCRL.Raw) {
+			t.Fatalf("Fetcher.Fetch() did not re-download the base CRL")
+		}
+	})
+
 	t.Run("Set cache error", func(t *testing.T) {
 		c := &errorCache{
 			GetError: ErrCacheMiss,

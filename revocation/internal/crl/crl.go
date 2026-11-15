@@ -199,6 +199,14 @@ func Supported(cert *x509.Certificate) bool {
 func validate(bundle *crl.Bundle, issuer *x509.Certificate) error {
 	// validate base CRL
 	baseCRL := bundle.BaseCRL
+	if baseCRL == nil {
+		// RFC 5280, Section 5.2.4: a delta CRL can only be processed
+		// together with a complete base CRL. A delta CRL without the
+		// corresponding base CRL is not sufficient to determine the
+		// revocation status, so the check must fail instead of being
+		// allowed.
+		return errors.New("base CRL cannot be nil")
+	}
 	if err := validateCRL(baseCRL, issuer); err != nil {
 		return fmt.Errorf("failed to validate base CRL: %w", err)
 	}
@@ -239,13 +247,25 @@ func validateCRL(crl *x509.RevocationList, issuer *x509.Certificate) error {
 		return fmt.Errorf("CRL is not signed by CA %s: %w,", issuer.Subject, err)
 	}
 
-	// check validity
+	// check validity. RFC 5280, Section 5.1.2.4:
+	// thisUpdate is mandatory and indicates when the CRL was issued, while
+	// nextUpdate is mandatory when the CRL issuer will publish a newer CRL
+	// and bounds how long the CRL may be relied upon.
+	if crl.ThisUpdate.IsZero() {
+		return errors.New("CRL ThisUpdate is not set")
+	}
+	now := time.Now()
+	if now.Before(crl.ThisUpdate) {
+		return fmt.Errorf("CRL is not yet valid. Current time %v is before CRL ThisUpdate %v", now, crl.ThisUpdate)
+	}
 	if crl.NextUpdate.IsZero() {
 		return errors.New("CRL NextUpdate is not set")
 	}
-	now := time.Now()
 	if now.After(crl.NextUpdate) {
 		return fmt.Errorf("expired CRL. Current time %v is after CRL NextUpdate %v", now, crl.NextUpdate)
+	}
+	if !crl.NextUpdate.After(crl.ThisUpdate) {
+		return fmt.Errorf("CRL NextUpdate %v is not after CRL ThisUpdate %v", crl.NextUpdate, crl.ThisUpdate)
 	}
 
 	for _, ext := range crl.Extensions {
